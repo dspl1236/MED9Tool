@@ -136,29 +136,58 @@ class Signatures:
 
     def find_ldrxn(self) -> dict:
         """
-        LDRXN — Load-request table (load vs RPM mapping).
-        Two table variants: LDRXN1 (normal) and LDRXN2 (sport/map2).
-        The instruction address is the patch point for multimap switching.
+        LDRXN — Load-request table (load vs RPM curve).
 
-        Signature v1 (from MED9Toolchain):
-          90 6d XX XX   stw r3, N(r13)
-          3c 60 00 5d   lis r3, 0x5d
-          38 63 XX XX   addi r3, r3, N   ← N encodes LDRXN1 low half
-          a0 8d XX XX   lhz r4, N(r13)
-          48 07 XX XX   bl FUN
+        The MED9.1 LDRXN is accessed via an INDIRECT pointer array:
+          - A pointer array in cal section holds 6 pointers, one per entry
+          - Each pointer points to: 16-entry RPM axis + 16-entry load values (33 uint16 total)
+          - The lwzx instruction selects which pointer to load based on engine state
+          - LDRXN1 = ptr_array[0] (normal map), LDRXN2 = ptr_array[1] (alternate map)
+          - PATCH_LDRXN = address of the lwzx r3, r10, r9 instruction to redirect
+
+        Confirmed structure on 1K0907115S:
+          PATCHADDR_LDRXN: phys=0x11A61C  (lwzx r3, r10, r9)
+          TABLE_LDRXN1:    phys=0x1CF308  (RPM axis; values at +32B = 0x1CF328)
+          TABLE_LDRXN2:    phys=0x1CF34A  (RPM axis; values at +32B = 0x1CF36A)
+
+        Signature v2 (confirmed for EA113 TFSI Golf V):
+          3D40005D   lis  r10, 0x5D
+          394AXXXX   addi r10, r10, N   ← encodes pointer array address
+          552915BA   rlwinm r9, r9, 2, 22, 29
+          7C6A482E   lwzx r3, r10, r9   ← PATCH POINT
+          A08DXXXX   lhz  r4, N(r13)
+
+        Note: VR6 Cayenne variants use a different pattern — Ghidra session needed.
         """
-        pattern = "906DXXXX 3C60005D 3863XXXX A08DXXXX 480XXXXX"
+        # v2 pattern: lis r10, 0x5D + addi + rlwinm (fixed) + lwzx (fixed) + lhz r4,(r13)
+        pattern = "3D40005D 394AXXXX 552915BA 7C6A482E A08DXXXX"
         sig_start = self._find(pattern)
-        patch_addr = sig_start + 8   # addi instruction
-        lo = self._pick16s(patch_addr + 2)
-        ldrxn1 = (0x5C << 16) | (lo & 0xFFFF)
-        ldrxn2 = ldrxn1 + 16 * 2    # +32 bytes: adjacent 16-entry table
+
+        # lwzx is at +12 bytes from pattern start
+        patch_addr = sig_start + 12
+
+        # addi encodes pointer array address: lis r10, 0x5D + addi r10, r10, lo
+        addi_off = sig_start + 4
+        lo = self._pick16s(addi_off + 2)
+        ptr_array_virt = (0x5D0000 + lo) & 0xFFFFFFFF
+        ptr_array_phys = ptr_array_virt - VIRT_BASE
+
+        # Read first two pointers from the array
+        if ptr_array_phys + 8 > len(self._data):
+            raise ValueError(f"Pointer array out of range: 0x{ptr_array_phys:06X}")
+        ldrxn1 = struct.unpack_from(">I", self._data, ptr_array_phys)[0]
+        ldrxn2 = struct.unpack_from(">I", self._data, ptr_array_phys + 4)[0]
+
         return {
-            "PATCH_LDRXN":  SigResult(physical=patch_addr, virtual=_to_virt(patch_addr)),
-            "TABLE_LDRXN1": SigResult(physical=ldrxn1 - VIRT_BASE, virtual=ldrxn1,
-                                      note="normal load table"),
-            "TABLE_LDRXN2": SigResult(physical=ldrxn2 - VIRT_BASE, virtual=ldrxn2,
-                                      note="sport load table"),
+            "PATCH_LDRXN":  SigResult(physical=patch_addr,
+                                      virtual=_to_virt(patch_addr),
+                                      note="lwzx r3,r10,r9 — redirect this for multimap"),
+            "TABLE_LDRXN1": SigResult(physical=ldrxn1 - VIRT_BASE,
+                                      virtual=ldrxn1,
+                                      note="RPM axis; load values at +32B"),
+            "TABLE_LDRXN2": SigResult(physical=ldrxn2 - VIRT_BASE,
+                                      virtual=ldrxn2,
+                                      note="RPM axis; load values at +32B (alternate map)"),
         }
 
     def find_kwp_table(self) -> SigResult:
