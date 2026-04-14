@@ -135,7 +135,7 @@ def _make_sgo(binary: bytes, key: str = "CodeRobert") -> bytes:
 
 class TestVersion:
     def test_version_exists(self):
-        assert __version__ == "0.1.3"
+        assert __version__ == "0.1.4"
 
     def test_version_string(self):
         assert __version__.count(".") == 2
@@ -614,3 +614,136 @@ class TestImmoPatches:
         from med9tool.immo_patches import apply_dtc_disable
         data = bytes(0x200000)
         assert len(apply_dtc_disable(data)) == len(data)
+
+
+# ── Security access ─────────────────────────────────────────────────────────
+
+class TestSecurity:
+    def test_read_key_known(self):
+        from med9tool.security import sa_read_key
+        # key = seed + 0x11170
+        assert sa_read_key(0x00000000) == 0x00011170
+        assert sa_read_key(0x00011170) == 0x000222E0
+        assert sa_read_key(0xFFFF0000) == (0xFFFF0000 + 0x11170) & 0xFFFFFFFF
+
+    def test_write_key_zero(self):
+        from med9tool.security import sa_write_key
+        # seed=0 → 5 rotations of 0 = 0, no XOR triggered
+        assert sa_write_key(0x00000000) == 0x00000000
+
+    def test_write_key_msb_set(self):
+        from med9tool.security import sa_write_key
+        # seed=0x80000000 → MSB set → XOR triggered on first round
+        key = sa_write_key(0x80000000)
+        assert isinstance(key, int)
+        assert 0 <= key <= 0xFFFFFFFF
+
+    def test_write_key_known_value(self):
+        from med9tool.security import sa_write_key
+        # From MED9RamReader source: same algorithm, verify determinism
+        k1 = sa_write_key(0x12345678)
+        k2 = sa_write_key(0x12345678)
+        assert k1 == k2
+
+    def test_validate_pair(self):
+        from med9tool.security import sa_read_key, validate_sa_pair
+        seed = 0xABCD1234
+        key = sa_read_key(seed)
+        assert validate_sa_pair(seed, key, mode="read")
+        assert not validate_sa_pair(seed, key + 1, mode="read")
+
+
+# ── EEPROM ──────────────────────────────────────────────────────────────────
+
+class TestEEPROM:
+    def _make_eeprom(self, immo_val: int = 0x01) -> bytes:
+        """Minimal valid-ish EEPROM with controllable immo_byte."""
+        from med9tool.eeprom import EEPROM_SIZE, IMMO_BYTE_ABS
+        data = bytearray(EEPROM_SIZE)
+        data[IMMO_BYTE_ABS] = immo_val
+        return bytes(data)
+
+    def test_parse_immo_byte(self):
+        from med9tool.eeprom import parse_eeprom
+        ee = self._make_eeprom(immo_val=0x55)
+        info = parse_eeprom(ee)
+        assert info.immo_byte == 0x55
+
+    def test_apply_immo_clears_byte(self):
+        from med9tool.eeprom import apply_immo_eeprom, IMMO_BYTE_ABS
+        ee = self._make_eeprom(immo_val=0xAA)
+        patched = apply_immo_eeprom(ee)
+        assert patched[IMMO_BYTE_ABS] == 0x00
+
+    def test_apply_immo_preserves_length(self):
+        from med9tool.eeprom import apply_immo_eeprom, EEPROM_SIZE
+        ee = self._make_eeprom()
+        assert len(apply_immo_eeprom(ee)) == EEPROM_SIZE
+
+    def test_apply_immo_updates_checksum(self):
+        from med9tool.eeprom import apply_immo_eeprom, BLOCK_RESV1
+        import struct
+        ee = self._make_eeprom(immo_val=0xFF)
+        patched = apply_immo_eeprom(ee)
+        # checksum = sum of first 30 bytes of block
+        block = patched[BLOCK_RESV1:BLOCK_RESV1 + 30]
+        expected_csum = sum(block) & 0xFFFF
+        stored_csum = struct.unpack_from(">H", patched, BLOCK_RESV1 + 30)[0]
+        assert stored_csum == expected_csum
+
+
+# ── Patch format ─────────────────────────────────────────────────────────────
+
+class TestPatchFormat:
+    def test_load_and_apply_patch(self, tmp_path):
+        from med9tool.patch_format import apply_patch_file
+        # Write a minimal patch JSON
+        patch_json = '''{"name":"test","diffs":[
+            {"addr":"0x00400010","value_old":"AABBCC","value_new":"60000000"}
+        ]}'''
+        p = tmp_path / "test.json"
+        p.write_text(patch_json)
+        # binary: physical 0x10 = virtual 0x400010
+        data = bytearray(64)
+        data[0x10:0x13] = bytes.fromhex("AABBCC")
+        result = apply_patch_file(bytes(data), p)
+        assert result[0x10:0x14] == bytes.fromhex("60000000")
+
+    def test_verify_mismatch_raises(self, tmp_path):
+        import pytest
+        from med9tool.patch_format import apply_patch_file, PatchError
+        patch_json = '''{"name":"t","diffs":[
+            {"addr":"0x00400010","value_old":"AABBCC","value_new":"60000000"}
+        ]}'''
+        p = tmp_path / "t.json"
+        p.write_text(patch_json)
+        data = bytearray(64)
+        data[0x10:0x13] = bytes.fromhex("001122")  # wrong
+        with pytest.raises(PatchError):
+            apply_patch_file(bytes(data), p)
+
+    def test_verify_disabled(self, tmp_path):
+        from med9tool.patch_format import apply_patch_file
+        patch_json = '''{"name":"t","diffs":[
+            {"addr":"0x00400010","value_old":"AABBCC","value_new":"DDEEFF"}
+        ]}'''
+        p = tmp_path / "t.json"
+        p.write_text(patch_json)
+        data = bytearray(64)
+        result = apply_patch_file(bytes(data), p, verify=False)
+        assert result[0x10:0x13] == bytes.fromhex("DDEEFF")
+
+    def test_apply_known_elias_patch(self, tmp_path):
+        """Apply a real EliasTuning patch structure."""
+        from med9tool.patch_format import load_patch, apply_patch
+        # boost_gauge.json: addr=0x47D000 (phys=0x07D000), CWLDANZ codeword
+        patch_json = '''{"name":"Boost Gauge","diffs":[
+            {"comment":"CWLDANZ Codewort","addr":"0x5C6338","value_old":"00","value_new":"01"}
+        ]}'''
+        p = tmp_path / "bg.json"
+        p.write_text(patch_json)
+        # Build binary with correct byte at phys 0x1C6338
+        data = bytearray(0x200000)
+        data[0x1C6338] = 0x00
+        result = apply_patch(bytes(data), load_patch(p))
+        assert result[0x1C6338] == 0x01
