@@ -135,7 +135,7 @@ def _make_sgo(binary: bytes, key: str = "CodeRobert") -> bytes:
 
 class TestVersion:
     def test_version_exists(self):
-        assert __version__ == "0.1.2"
+        assert __version__ == "0.1.3"
 
     def test_version_string(self):
         assert __version__.count(".") == 2
@@ -567,3 +567,50 @@ class TestFRDatabase:
         unpacked = struct.unpack_from(">H", packed)[0]
         assert packed == b'\x61\xa8'   # 0x61A8 = 25000
         assert unpacked == 25000
+
+
+# ── Immo + DTC patches ─────────────────────────────────────────────────────
+
+class TestImmoPatches:
+    def test_immo_brute_modifies_code_section(self):
+        from med9tool.immo_patches import count_immo_patches
+        data = bytes(range(256)) * (2097152 // 256)
+        counts = count_immo_patches(data)
+        # counts should be dict with keys
+        assert "flag_gates" in counts
+        assert "poll_loops" in counts
+        assert counts["total"] == counts["flag_gates"] + counts["poll_loops"]
+
+    def test_immo_brute_preserves_binary_length(self):
+        from med9tool.immo_patches import apply_immo_brute
+        data = b'\x00' * 0x200000
+        result = apply_immo_brute(data)
+        assert len(result) == len(data)
+
+    def test_immo_brute_nops_are_ppc_nop(self):
+        import struct
+        from med9tool.immo_patches import apply_immo_brute, NOP_PPC
+        lbz  = struct.pack('>I', (34<<26)|(12<<21)|(13<<16)|(0xEC99))
+        cmpwi = struct.pack('>I', (11<<26)|(0<<21)|(12<<16)|0)
+        bc    = struct.pack('>I', (16<<26)|(12<<21)|(2<<16)|(50<<2)|0)
+        data = b'\x60\x00\x00\x00' * (0x020000 // 4)  # NOP pad to code start
+        data += lbz + cmpwi + bc + b'\x00' * (0x200000 - len(data) - 12)
+        result = apply_immo_brute(data)
+        # The bc at code_start+8 should now be NOP
+        patched_word = struct.unpack_from('>I', result, 0x020008)[0]
+        assert patched_word == NOP_PPC
+
+    def test_dtc_disable_zeros_cd_params(self):
+        from med9tool.immo_patches import apply_dtc_disable, CD_PARAMS_1K0907115
+        # Build a binary with stock values at the CD addresses
+        data = bytearray(0x200000)
+        for p in CD_PARAMS_1K0907115:
+            data[p.addr] = p.stock_val
+        result = apply_dtc_disable(bytes(data))
+        for p in CD_PARAMS_1K0907115:
+            assert result[p.addr] == p.patch_val, f"{p.name} not patched"
+
+    def test_dtc_disable_preserves_length(self):
+        from med9tool.immo_patches import apply_dtc_disable
+        data = bytes(0x200000)
+        assert len(apply_dtc_disable(data)) == len(data)
