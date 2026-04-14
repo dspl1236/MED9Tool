@@ -49,8 +49,17 @@ def apply_speed_remove(data: bytearray) -> PresetResult:
     """Remove speed limiter by setting all speed limit values to max.
 
     MED9 stores speed as big-endian uint16 in km/h × 100.
-    Finds clusters of identical speed values and overwrites them.
+    The VMAXNB parameter is stored as a KL (per-gear table) in most variants:
+    9 consecutive identical values = one entry per gear position (0–8).
+
+    Cross-variant validation (8 of 9 Cayenne 3.6L variants):
+      BG/CA/DA/EK/L: 9 × 26000 (260 km/h) after 4 zero bytes → VMAXNB KL
+      BE_1635: 1 × 26214 (262.1 km/h) after 8 zero bytes → VMAXTM first entry
+
+    Patching strategy: find isolated value → patch the ENTIRE run of identical
+    values (up to MAX_RUN entries), ensuring all gear positions are updated.
     """
+    MAX_RUN = 200   # safety cap on run length (in words)
     result = PresetResult(preset_name="speed_remove")
     hits = find_speed_limiter(bytes(data))
 
@@ -61,13 +70,12 @@ def apply_speed_remove(data: bytearray) -> PresetResult:
         ))
         return result
 
-    # Patch the highest-confidence cluster
+    # Patch the highest-confidence cluster and its full run
     best = hits[0]
-    patched = 0
     old_val = struct.unpack_from(">H", data, best.offset)[0]
+    patched = 0
 
-    # Patch the entire cluster
-    for off in range(best.offset, min(len(data) - 2, best.offset + 40), 2):
+    for off in range(best.offset, min(len(data) - 2, best.offset + MAX_RUN * 2), 2):
         v = struct.unpack_from(">H", data, off)[0]
         if v == old_val:
             struct.pack_into(">H", data, off, SPEED_REMOVE_VALUE)
@@ -79,9 +87,9 @@ def apply_speed_remove(data: bytearray) -> PresetResult:
         name="VMAX",
         success=True,
         address=best.offset,
-        old_value=f"{old_val / 100:.0f} km/h × {patched}",
+        old_value=f"{old_val / 100:.0f} km/h",
         new_value=f"{SPEED_REMOVE_VALUE / 100:.0f} km/h",
-        notes=f"Patched {patched} values at 0x{best.offset:06X} ({best.confidence})",
+        notes=f"Patched {patched}×{old_val} → {SPEED_REMOVE_VALUE} at 0x{best.offset:06X} [{best.confidence}]",
     ))
     return result
 
