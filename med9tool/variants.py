@@ -78,16 +78,24 @@ VARIANTS: dict[str, ECUVariant] = {
         cal_section_base=0x1C0000,
         cal_section_size=0x40000,
         applications=[
-            "Porsche Cayenne 3.6 FSI V6 (M55.01) 2008-2010  [03H906032xx]",
+            "Porsche Cayenne 3.6 FSI V6 (M55.01) 2003-2010  [03H906032xx]",
+            "Porsche Cayenne 4.5 V8 2002-2006  [03H906032xx early]",
+            "Porsche Cayenne Turbo/GTS V8 [03H906032GL/GM]",
             "VW Touareg 3.6 FSI V6 2008-2010",
             "Audi Q7 3.6 FSI 2007-2010",
             "VW Golf R32 MK5 (BUB)  [03H906026xx]",
             "Audi TT 3.2 VR6 (BUB)",
             "VW Passat 3.6 VR6 (BLV)",
             "VW CC 3.6 VR6",
-            "VW Golf V 2.0 TFSI early (BWA)  [1K0907115]",
+            "VW Golf V 2.0 TFSI (BWA/BPY/CCTA early)  [1K0907115xx]",
+            "VW Jetta V 2.0 TFSI  [1K0907115xx]",
+            "VW Golf VI 2.0 TFSI early  [1K8907115xx]",
         ],
-        vag_pn_prefixes=["03H906032", "03H906026", "03H997033", "03H997034", "1K0907115"],
+        vag_pn_prefixes=[
+            "03H906032", "03H906026", "03H906026B",
+            "03H997033", "03H997034",
+            "1K0907115", "1K8907115",
+        ],
         notes=(
             "MPC5554 (Power Architecture, 2MB H7Fa internal flash + 496KB EBI code flash). "
             "64KB SRAM, 32KB cache, 132 MHz max. ERCOSEK V4.x RTOS. "
@@ -97,9 +105,22 @@ VARIANTS: dict[str, ECUVariant] = {
             "lives in eTPU microcode params (SRAM), NOT in the H7Fa cal flash. "
             "Direct RPM values found in cal flash (0x1C2000+) are NMAXGA/NMAXOGGA tables. "
             "Speed: VMAXNB stored as per-gear KL, 9 entries × uint16 BE × km/h×100. "
-            "03H906032BG/CA/DA/EK/L: VMAXNB=260 km/h (26000). "
-            "03H906032BE: top scan hit is VMAXTM[0]=262.14 km/h (ascending curve, not VMAXNB). "
-            "Rev: NMAXOGGA=8473–8481 RPM (direct BE uint16), consistent across all 9 variants. "
+            "CD params (CDHSH/CDHSV/CDKAT): Cayenne variants ship with ALL disabled "
+            "(CDHSH=0,CDHSV=0,CDKAT=0,CDKATSP=7). Golf V TFSI ships with active "
+            "(CDHSH=1,CDHSV=1,CDKAT=0,CDKATSP=7). "
+            "SA2 security access: READ seed+0x11170; WRITE 5-round rotate-XOR 0x5FBD5DBD. "
+            "SA2 prefix 6805814A0587 confirmed identical across ALL 2024 flashdaten variants. "
+            "Rev limits from 40-file corpus (SGML v2 decoded, 2024 VW/Audi flashdaten): "
+            "5654 RPM (5×: AM,DQ,ED,FS,GQ early base variants), "
+            "6939 RPM (1×: EB), "
+            "7251 RPM (3×: DT,EA,EE late MY variants), "
+            "7974 RPM (1×: CA), "
+            "8481 RPM (2×: GL,GM GTS/sport variants). "
+            "Speed limits: 192–279 km/h across market variants. "
+            "New confirmed PNs (2024 flashdaten, SGML format): "
+            "03H906032AB/AC/AG/AM/AN/BE/BG/BR/BS/CA/CC/CS/DA/DC/DG/DJ/DQ/DR/DT/"
+            "EA/EB/ED/EE/EK/EP/FS/GL/GM/GQ/HD/HE/L/S — all MED9.1 VR6/V8 Cayenne. "
+            "Golf V/Jetta: 1K0907115AB/AH/AP/AQ/AR/AS/AT/A/B/D/E/H/J/K/L/M/N/P/Q/R/S/T. "
             "Bench read: Nexus debug port (MDO0-11, MCKO pins) per MPC5554 datasheet §3.13.3. "
         ),
     ),

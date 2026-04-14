@@ -234,18 +234,33 @@ class Signatures:
     def find_cd_block(self) -> SigResult:
         """
         Find the CD diagnostic enable parameter block.
-        Confirmed at 0x1DD640 in 1K0907115S (physical).
-        Uses the known byte sequence pattern around CDKAT/CDHSH.
 
-        Pattern: isolated single-byte values 0x00/0x01/0x07 in a
-        contiguous run, preceded by numeric data — fragile across variants.
-        A more robust approach uses the XDF or a DAMOS map.
+        Two confirmed patterns (cal section 0x1C0000–0x1FFFFF only):
+
+        TFSI-active (1K0907115S Golf V, all params enabled):
+            CDHSH=0x01, CDHSHE=0x00, CDHSV=0x01, CDHSVSA=0x00, CDKAT=0x00, CDKATSP=0x07
+            Pattern: "01 00 01 00 00 07"
+
+        Cayenne-disabled (03H906032xx, all params disabled from factory):
+            CDHSH=0x00, CDHSHE=0x00, CDHSV=0x00, CDHSVSA=0x00, CDKAT=0x00, CDKATSP=0x07
+            Pattern: "00 00 00 00 00 07"
+
+        Returns address of CDHSH (first byte of block) in both cases.
+        Raises ValueError if no unambiguous match found.
         """
-        # CDHSH=0x01, CDHSHE=0x00, CDHSV=0x01, CDHSVSA=0x00, CDKAT=0x00, CDKATSP=0x07
-        pattern = "01000100000701"  # CDHSH..CDKATSP
-        try:
-            off = self._find(pattern, 0x1C0000, 0x200000)
-            return SigResult(physical=off, virtual=_to_virt(off),
-                             note="CD block: CDHSH at offset +0, CDKAT at +4")
-        except ValueError:
-            raise ValueError("CD param block not found — needs XDF or DAMOS for this variant")
+        cal_start = 0x1C0000
+        cal_end   = 0x200000
+
+        for pattern, note in [
+            ("010001000007", "CDHSH at offset+0, CDKAT at +4 [TFSI-active]"),
+            ("000000000007", "CDHSH at offset+0, CDKAT at +4 [Cayenne-disabled]"),
+        ]:
+            try:
+                off = self._find(pattern, cal_start, cal_end)
+                return SigResult(physical=off, virtual=_to_virt(off), note=note)
+            except ValueError:
+                pass
+
+        raise ValueError(
+            "CD param block not found — variant may have non-standard CD encoding"
+        )

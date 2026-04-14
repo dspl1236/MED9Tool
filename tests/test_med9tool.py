@@ -135,7 +135,7 @@ def _make_sgo(binary: bytes, key: str = "CodeRobert") -> bytes:
 
 class TestVersion:
     def test_version_exists(self):
-        assert __version__ == "0.1.7"
+        assert __version__ == "0.1.8"
 
     def test_version_string(self):
         assert __version__.count(".") == 2
