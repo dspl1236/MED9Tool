@@ -171,52 +171,92 @@ def _conf_rank(conf: str) -> int:
 
 def find_rev_limiter(data: bytes) -> list[ScanHit]:
     """
-    Find rev limiter candidates.
+    Find rev limiter candidates (NMAXOGGA / NMAXGA per-gear table).
 
     Encoding: big-endian uint16, RPM direct.
-    Pattern: same value appears at two consecutive offsets (doubled value),
-    in the range 5000–8500 RPM.  Doubled pattern required to filter noise.
+    Range: 5000–9500 RPM (covers all known Cayenne V8, VR6, and TFSI variants).
+
+    Two detection strategies, both scanning 0x1C0000–0x200000:
+
+    1. Run-of-4 pattern (NMAXGA table): the per-gear RPM limit table stores
+       the same value in 4–9+ consecutive uint16 slots.  Confirmed in BG/BE/DA/L
+       Cayenne variants.  High confidence.
+
+    2. Doubled-pair pattern (NMAXOGGA scalar): single value stored twice.
+       Two variants:
+         a. Neighbours are RPM-like (1000–9500): high confidence.
+         b. Neighbours are not RPM-like: medium confidence (Cayenne Turbo
+            cal sections often have non-RPM data adjacent to NMAXOGGA).
     """
-    cal_start, cal_end = find_cal_area(data)
+    scan_start = 0x1C0000
+    scan_end   = min(0x200000, len(data) - 6)
+
     hits: list[ScanHit] = []
     seen: set[int] = set()
 
-    for off in range(cal_start, min(cal_end, len(data) - 6), 2):
+    off = scan_start
+    while off < scan_end:
         v = struct.unpack_from(">H", data, off)[0]
-        if not (5000 <= v <= 8500):
+
+        if not (5000 <= v <= 9500):
+            off += 2
             continue
         if off in seen:
+            off += 2
             continue
 
-        # Require doubled value (same RPM at next word)
-        v2 = struct.unpack_from(">H", data, off + 2)[0]
-        if v2 != v:
+        # Measure run length
+        run = 1
+        while (off + run * 2 < scan_end and
+               struct.unpack_from(">H", data, off + run * 2)[0] == v):
+            run += 1
+
+        if run >= 4:
+            # Run-of-4+: strong NMAXGA per-gear table
+            hits.append(ScanHit(
+                name="NMAXGA",
+                offset=off,
+                value=float(v),
+                confidence="high" if 5000 <= v <= 9200 else "medium",
+                notes=f"{v} RPM run×{run} BE (per-gear table)",
+            ))
+            for i in range(run):
+                seen.add(off + i * 2)
+            off += run * 2
             continue
 
-        # Context: surrounding values should also be RPM-like (or near zero)
-        try:
-            pre1 = struct.unpack_from(">H", data, off - 2)[0]
-            nxt2 = struct.unpack_from(">H", data, off + 4)[0]
-        except struct.error:
-            continue
+        if run >= 2:
+            # Doubled-pair: check neighbours
+            pre1 = struct.unpack_from(">H", data, off - 2)[0] if off >= scan_start + 2 else 0
+            nxt2_off = off + 4
+            nxt2 = struct.unpack_from(">H", data, nxt2_off)[0] if nxt2_off < scan_end else 0
 
-        pre_ok = pre1 == 0 or 1000 <= pre1 <= 9000
-        nxt_ok = nxt2 == 0 or 1000 <= nxt2 <= 9000
-        if not (pre_ok and nxt_ok):
-            continue
+            pre_ok = pre1 == 0 or 1000 <= pre1 <= 9500
+            nxt_ok = nxt2 == 0 or 1000 <= nxt2 <= 9500
 
-        hits.append(ScanHit(
-            name="NMAX",
-            offset=off,
-            value=float(v),
-            confidence="high" if 5500 <= v <= 8000 else "medium",
-            notes=f"{v} RPM doubled BE",
-        ))
-        seen.add(off)
-        seen.add(off + 2)
+            conf = "high" if (pre_ok and nxt_ok) else "medium"
+            hits.append(ScanHit(
+                name="NMAX",
+                offset=off,
+                value=float(v),
+                confidence=conf,
+                notes=f"{v} RPM doubled BE"
+                      + ("" if pre_ok and nxt_ok else " (non-RPM neighbours)"),
+            ))
+            seen.add(off)
+            seen.add(off + 2)
 
-    hits.sort(key=lambda h: -h.value)
-    return hits[:5]
+        off += 2
+
+    # Deduplicate by RPM value; prefer high-confidence and earlier address
+    seen_vals: dict[int, ScanHit] = {}
+    for h in sorted(hits, key=lambda h: (0 if h.confidence == "high" else 1, h.offset)):
+        iv = int(h.value)
+        if iv not in seen_vals:
+            seen_vals[iv] = h
+
+    result = sorted(seen_vals.values(), key=lambda h: -h.value)
+    return result[:8]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
