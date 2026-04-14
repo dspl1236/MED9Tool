@@ -5,28 +5,43 @@ MED9 = Motronic Electronic Direct Injection, generation 9.
 Gasoline direct injection ECUs using Freescale MPC5xx PowerPC.
 Predecessor to MED17 (TriCore). Successor to ME7 (port injection).
 
-Hardware architecture (confirmed from MPC5554 data sheet, Rev. 4):
+Hardware architecture (MPC5554 data sheet, Rev. 4, Freescale 2008/2012):
   CPU core:    Power Architecture embedded (100% PowerPC ISA compatible)
-               + DSP extensions, big-endian
-  Flash:       H7Fa internal flash, up to 4MB depending on variant
-               Low blocks:  16KB + 48KB + 64KB at 0x000000
-               High blocks: 128KB × N up to 0x3FFFFF
-  SRAM:        64KB on-chip at 0x40000000
-  Cache:       32KB unified
-  Timers:      2× eTPU (32 ch each), eMIOS (24 ch)
-  ADC:         eQADC 40-channel
-  Serial:      FlexCAN, DSPI, eSCI
-  EBI:         External Bus Interface — used by Bosch for external cal flash
+               + DSP/SPE extensions, BIG ENDIAN (all multi-byte values MSB first)
+               Runs up to 132 MHz (product variants: 80/112/132 MHz)
+  Flash:       H7Fa internal flash, 2MB on MPC5554 (MPC5566=3MB, MPC5567=4MB)
+               Block sizes: 16KB, 48KB, 64KB, 128KB
+               Program/erase endurance: 100k cycles (16/48/64KB), 1k (128KB)
+               Data retention: 20y (0-1k P/E), 5y (1k-100k P/E)
+               Min flash op frequency: 25 MHz
+               BIU settings for 132 MHz: APC=0b010, RWSC=0b011, WWSC=0b01
+  SRAM:        64KB on-chip (+ 32KB unified cache)
+               Standby supply VSTBY=0.8-1.2V; IDD_STBY 20-2000 µA (25-150°C)
+  Timers:      2× eTPU (32 ch each = 64 total) — handles crank/cam capture
+               → rev limit comparison lives in eTPU microcode, NOT cal flash
+               eMIOS 24 ch (PWM/single/double action)
+  ADC:         eQADC dual 40-channel, 12-bit, max 12 MHz ADCLK (800 KS/s)
+               Resolution 1.25 mV/count at 5.12V reference
+  Serial:      FlexCAN × 3, DSPI × 5, eSCI × 2
+  Debug:       JTAG (IEEE 1149.1) + Nexus debug port (MDO0-11, MCKO, MSEO0-1)
+               → Nexus is the bench-read path used by commercial tools
+  EBI:         External Bus Interface — Bosch maps additional code flash here
+               Max EBI clock = ½ internal clock (66 MHz at 132 MHz core)
 
-Memory map in MED9.1 (03H906032 Cayenne):
-  0x000000 - 0x1FFFFF  Internal flash (2MB):
+Memory map in MED9.1 (03H906032 Cayenne, confirmed from SGO section table):
+  0x000000 - 0x1FFFFF  Internal H7Fa flash (2MB on MPC5554):
+    0x000000 - 0x01FFFF  Boot + low address blocks (128KB, not in SGO)
     0x020000 - 0x07FFFF  Code section 2 (384KB)
-    0x080000 - 0x09FFFF  Code section 4 (128KB)
+    0x080000 - 0x09FFFF  Code section 4 (128KB, 1 × 128KB block)
     0x0A0000 - 0x1BFFFF  Main application section 3 (1152KB)
     0x1C0000 - 0x1FFFFF  Calibration section 5 (256KB) ← ERCOSEK params
-  0x404000 - 0x47FFFF  EXTERNAL flash via EBI (496KB):
-    Section 1 — additional application CODE (not calibration)
-    Contains PowerPC machine code; do NOT scan for cal values here.
+      0x1C2000: ERCOSEK header (5A5A5A5A CCCCCCCC)
+      0x1C2080: AFFE0815 sub-section sentinel
+      0x1C2100: Cal data start (VMAXNB KL, NMAXGA KL, etc.)
+  0x404000 - 0x471FFF  External flash via EBI (496KB, section 1):
+    Additional application CODE only — do NOT scan for calibration here.
+    PowerPC big-endian machine code; speed/rev patterns here are coincidental.
+  [gap 0x200000-0x403FFF: unmapped / 0xFF in image]
 """
 from dataclasses import dataclass, field
 from enum import Enum
@@ -74,12 +89,18 @@ VARIANTS: dict[str, ECUVariant] = {
         ],
         vag_pn_prefixes=["03H906032", "03H906026", "03H997033", "03H997034", "1K0907115"],
         notes=(
-            "MPC5554 (Power Architecture, 2MB H7Fa flash, 64KB SRAM, 132 MHz max). "
-            "Additional 496KB code-only flash at EBI 0x404000 (do not scan for cal). "
-            "ERCOSEK V4.x RTOS. Cal section at 0x1C0000, active cal from 0x1C2000. "
-            "03H906032 SGOs: key=CodeRobert, section 5 = VMAXNB per-gear KL (9 entries). "
-            "03H906032BG/CA/DA/EK/L: VMAXNB=260 km/h; 03H906032BE: VMAXNB in VMAXTM table. "
-            "NMAXOGGA ≈ 8473–8481 RPM, consistent across all variants. "
+            "MPC5554 (Power Architecture, 2MB H7Fa internal flash + 496KB EBI code flash). "
+            "64KB SRAM, 32KB cache, 132 MHz max. ERCOSEK V4.x RTOS. "
+            "Cal section at 0x1C0000 (ERCOSEK header), active cal from 0x1C2100. "
+            "EBI section at 0x404000 = application code only — do NOT scan for cal values. "
+            "IMPORTANT: eTPU engines handle crank/cam capture — rev limit comparison "
+            "lives in eTPU microcode params (SRAM), NOT in the H7Fa cal flash. "
+            "Direct RPM values found in cal flash (0x1C2000+) are NMAXGA/NMAXOGGA tables. "
+            "Speed: VMAXNB stored as per-gear KL, 9 entries × uint16 BE × km/h×100. "
+            "03H906032BG/CA/DA/EK/L: VMAXNB=260 km/h (26000). "
+            "03H906032BE: top scan hit is VMAXTM[0]=262.14 km/h (ascending curve, not VMAXNB). "
+            "Rev: NMAXOGGA=8473–8481 RPM (direct BE uint16), consistent across all 9 variants. "
+            "Bench read: Nexus debug port (MDO0-11, MCKO pins) per MPC5554 datasheet §3.13.3. "
         ),
     ),
     "MED9.5": ECUVariant(
