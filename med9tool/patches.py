@@ -15,6 +15,7 @@ import struct
 from dataclasses import dataclass, field
 
 from .scanner import find_speed_limiter, find_rev_limiter
+from .fr_database import SPEED_REMOVE_RAW as SPEED_REMOVE_VALUE
 
 
 @dataclass
@@ -42,9 +43,6 @@ class PresetResult:
     def total(self) -> int:
         return len(self.patches)
 
-
-# Target value for speed limiter removal: 655.34 km/h (0xFFFC as uint16)
-SPEED_REMOVE_VALUE = 0xFFFC  # 65532 → 655.32 km/h
 
 
 def apply_speed_remove(data: bytearray) -> PresetResult:
