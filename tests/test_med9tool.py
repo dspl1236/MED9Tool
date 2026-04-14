@@ -135,7 +135,7 @@ def _make_sgo(binary: bytes, key: str = "CodeRobert") -> bytes:
 
 class TestVersion:
     def test_version_exists(self):
-        assert __version__ == "0.1.4"
+        assert __version__ == "0.1.5"
 
     def test_version_string(self):
         assert __version__.count(".") == 2
@@ -747,3 +747,101 @@ class TestPatchFormat:
         data[0x1C6338] = 0x00
         result = apply_patch(bytes(data), load_patch(p))
         assert result[0x1C6338] == 0x01
+
+
+# ── Checksum ─────────────────────────────────────────────────────────────────
+
+class TestChecksum:
+    def test_crc32_bosch_known(self):
+        from med9tool.checksum import crc32_bosch
+        # Empty input → 0
+        assert crc32_bosch(b"") == 0
+        # Single byte
+        result = crc32_bosch(b"\x00")
+        assert isinstance(result, int)
+        assert 0 <= result <= 0xFFFFFFFF
+
+    def test_crc32_deterministic(self):
+        from med9tool.checksum import crc32_bosch
+        data = bytes(range(256))
+        assert crc32_bosch(data) == crc32_bosch(data)
+
+    def test_flash_blocks_cover_2mb(self):
+        from med9tool.checksum import FLASH_BLOCKS
+        # All blocks fit within 2MB
+        for start, end, _ in FLASH_BLOCKS:
+            assert 0 <= start < end <= 0x200000
+
+    def test_affe_detection(self):
+        from med9tool.checksum import has_affe_placeholder, ERCOSEK_CRC_LOC
+        import struct
+        data = bytearray(0x200000)
+        # Set AFFE marker
+        struct.pack_into(">H", data, ERCOSEK_CRC_LOC, 0xAFFE)
+        assert has_affe_placeholder(bytes(data))
+        # Clear it
+        struct.pack_into(">H", data, ERCOSEK_CRC_LOC, 0x1234)
+        assert not has_affe_placeholder(bytes(data))
+
+    def test_needs_checksum_fix_affe(self):
+        from med9tool.checksum import needs_checksum_fix, ERCOSEK_CRC_LOC
+        import struct
+        data = bytearray(0x200000)
+        struct.pack_into(">H", data, ERCOSEK_CRC_LOC, 0xAFFE)
+        assert needs_checksum_fix(bytes(data))
+
+
+# ── Presets ──────────────────────────────────────────────────────────────────
+
+class TestPresets:
+    def _make_med9_binary(self):
+        """Minimal 2MB binary with ERCOSEK header and CD params."""
+        from med9tool.immo_patches import CD_PARAMS_1K0907115
+        from med9tool.checksum import ERCOSEK_MAGIC
+        data = bytearray(0x200000)
+        # ERCOSEK magic
+        data[ERCOSEK_MAGIC:ERCOSEK_MAGIC+8] = b'\x5A\x5A\x5A\x5A\xCC\xCC\xCC\xCC'
+        # CD params at stock values
+        for p in CD_PARAMS_1K0907115:
+            data[p.addr] = p.stock_val
+        return bytes(data)
+
+    def test_list_presets(self):
+        from med9tool.presets import list_presets
+        presets = list_presets()
+        assert "speed_remove"   in presets
+        assert "immo_off"       in presets
+        assert "emissions_full" in presets
+        assert "swap_full"      in presets
+
+    def test_apply_preset_unknown(self):
+        from med9tool.presets import apply_preset
+        import pytest
+        with pytest.raises(ValueError, match="Unknown preset"):
+            apply_preset(b"\x00" * 0x200000, "nonexistent")
+
+    def test_emissions_full_result(self):
+        from med9tool.presets import apply_preset
+        from med9tool.immo_patches import CD_PARAMS_1K0907115
+        data = self._make_med9_binary()
+        patched, result = apply_preset(data, "emissions_full")
+        assert result.preset_name == "emissions_full"
+        for p in CD_PARAMS_1K0907115:
+            assert patched[p.addr] == p.patch_val
+
+    def test_swap_full_applies_all(self):
+        from med9tool.presets import apply_preset
+        from med9tool.immo_patches import CD_PARAMS_1K0907115
+        data = self._make_med9_binary()
+        patched, result = apply_preset(data, "swap_full")
+        assert result.preset_name == "swap_full"
+        assert result.bytes_changed > 0
+        # CD params zeroed
+        for p in CD_PARAMS_1K0907115:
+            assert patched[p.addr] == p.patch_val
+
+    def test_preset_preserves_length(self):
+        from med9tool.presets import apply_preset
+        data = self._make_med9_binary()
+        patched, _ = apply_preset(data, "immo_off")
+        assert len(patched) == len(data)

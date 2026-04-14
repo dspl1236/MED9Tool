@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "med9tool"
-version = "0.1.4"
+version = "0.1.5"
 description = "MED9.1/MED9.5 ECU editor for MPC5xx (PowerPC big-endian) VAG ECUs"
 requires-python = ">=3.10"
 dependencies = []
