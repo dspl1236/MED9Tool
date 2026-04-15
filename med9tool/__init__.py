@@ -1,5 +1,5 @@
 """MED9Tool — MED9.1/MED9.5 ECU editor for MPC5xx platforms."""
-__version__ = "0.1.11"
+__version__ = "0.1.12"
 
 from .fr_database import (  # noqa: F401
     FRParam, ALL_PARAMS, BGVMAX_PARAMS, NMAXMD_PARAMS,
