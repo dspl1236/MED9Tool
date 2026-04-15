@@ -125,7 +125,8 @@ VARIANTS: dict[str, ECUVariant] = {
             "6682 (J_0030), 7453 (H_0040), 7762 (S_0040 BWA/CCTA), 7786 (1K8F_0040), "
             "8307 (M/N_0020), 8794 (L_0030), 8813 (K_0040), 8961 (1K8B_0030), "
             "8996 (Q/R_0020 CCTA), 9281 (D/E early). "
-            "AB/AH/AP/AQ/AS/AT (SW 0030-0040): no scanner hits — newer cal layout. "
+            "AB/AH/AP/AQ/AS/AT (SW 0030-0040): no scanner hits — firmware-only SGOs "
+            "(cal region is 100% zeros in flashdaten package; calibration shipped separately). "
             "Bench read: Nexus debug port (MDO0-11, MCKO pins) per MPC5554 datasheet §3.13.3. "
         ),
     ),
