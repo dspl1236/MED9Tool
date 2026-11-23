@@ -9,17 +9,22 @@ Supports two formats:
 
 2. SGML Object File v2 (modern flashdaten, 2018+):
    Container format used by ODIS/VAS-PC. 16-byte magic "SGML Object File",
-   binary header with section offsets, blocks XOR'd with 0xFF. Each compressed
-   block (fmt=0x11) contains a plaintext FRF-style header followed by
-   BCB Type1 compressed binary data.
+   binary header with section offsets, blocks XOR'd with 0xFF. Each fmt=0x11
+   block has a plaintext FRF-style header ([START_ADDRESS]/[END_ADDRESS])
+   followed by a keyed *record* stream:
 
-   BCB Type1 algorithm (Bosch Compact Binary, d3irb / nefariousmotorsports #6583):
-   - Flag-byte approach: 1 flag byte controls 8 tokens (MSB first)
-   - Flag=0 → literal byte; Flag=1 → back-reference (2 bytes, BE: count[6]|disp[10])
-   - disp=0 or count=0 → no-op token (not end-of-stream)
-   - No ring-buffer pre-fill; back-reference indexes directly into decoded output
+   - XOR 0xFF, then from a 1A 01 sync the stream is XOR'd with a repeating
+     ASCII key (MED9 = "CodeRobert"; other known keys tried as fallback).
+   - Big-endian 16-bit records: count < 0x4000 = literal run, 0x4000..0xBFFF =
+     RLE (count-0x4000 copies of the next byte), >= 0xC000 = terminal (24-bit
+     checksum field).
 
-   Source addresses in SGML are physical flash addresses (no virtual offset needed).
+   This is the record coding verified against the 2013 SGO Extract.exe; the
+   decoder is ported from lsdlsd88/TCU-FRF-SGO-UNPACKER (MIT) and validated
+   byte-for-byte against real 03H906032 MED9 flashdaten. (The previous flag-byte
+   LZ "BCB Type1" decoder was wrong for MED9 and produced garbage firmware.)
+
+   Source addresses come from each block's [START_ADDRESS] header.
 """
 from __future__ import annotations
 import re
@@ -167,56 +172,83 @@ def _unpack_rolling_xor(data: bytes, verbose: bool = False) -> SGOResult:
 
 # ── SGML Object File v2 decoder ───────────────────────────────────────────────
 
-def _bcb_decompress(compressed: bytes, expected_size: int) -> bytes:
-    """
-    BCB Type1 decompressor (Bosch Compact Binary).
+# Keyed record stream — the real fmt=0x11 payload coding.
+# Faithful MIT port of lsdlsd88/TCU-FRF-SGO-UNPACKER sgo_legacy.py record_decode
+# (verified against the 2013 SGO Extract.exe). See THIRD_PARTY_NOTICES.md. The
+# MED9 key is "CodeRobert"; the rest are tried as a fallback for other families.
+_RECORD_KEYS = (b"CodeRobert", b"GEHEIM", b"BiWbBuD101", b"Mst2Bosch")
+_XOR_FF = bytes(i ^ 0xFF for i in range(256))
 
-    Flag-byte approach: one byte controls 8 tokens (MSB first).
-      flag=0 → literal (1 byte)
-      flag=1 → back-reference (2 bytes BE: upper 6 bits = count, lower 10 = disp)
-    disp=0 or count=0 are no-ops (not end-of-stream).
 
-    Confirmed by d3irb (nefariousmotorsports.com topic 6583) and validated
-    against TriCoreTool FRF block decompression.
-    """
+def _xor_span(data: bytes, start: int, mask: bytes, count: int) -> bytes:
+    """data[start:start+count] XOR mask[:count], at C speed."""
+    return (int.from_bytes(data[start:start + count], "big")
+            ^ int.from_bytes(mask[:count], "big")).to_bytes(count, "big")
+
+
+def record_decode(data: bytes, key: bytes) -> bytes:
+    """XOR-FF, then a 1A 01 sync and keyed BE16 literal/RLE records (24-bit terminal)."""
+    wire = bytes(data).translate(_XOR_FF)
+    pos = wire.find(b"\x1a\x01")
+    if pos < 0:
+        raise ValueError("record sync 1A 01 missing")
+    pos += 2
+    mask = key * (len(wire) // len(key) + 3)
+    plain = wire[:pos] + _xor_span(wire, pos, mask, len(wire) - pos)
     out = bytearray()
-    pos = 0
-    while pos < len(compressed) and len(out) < expected_size:
-        flag_byte = compressed[pos]; pos += 1
-        for bit in range(7, -1, -1):
-            if len(out) >= expected_size or pos >= len(compressed):
-                break
-            if not (flag_byte >> bit) & 1:
-                # Literal
-                out.append(compressed[pos]); pos += 1
-            else:
-                # Back-reference
-                if pos + 1 >= len(compressed):
-                    break
-                sh = (compressed[pos] << 8) | compressed[pos + 1]; pos += 2
-                count = sh >> 10
-                disp  = sh & 0x3FF
-                if count == 0 or disp == 0:
-                    continue  # no-op, not EOF
-                for _ in range(count):
-                    if len(out) >= expected_size:
-                        break
-                    out.append(out[-disp] if len(out) >= disp else 0)
-    return bytes(out[:expected_size])
+
+    def take(n: int) -> bytes:
+        nonlocal pos
+        if pos + n > len(plain):
+            raise ValueError("truncated record")
+        chunk = plain[pos:pos + n]
+        pos += n
+        return chunk
+
+    while pos < len(wire):
+        count = int.from_bytes(take(2), "big")
+        if count >= 0xC000:
+            take(3)  # terminal 24-bit checksum field; consumed, not emitted
+            return bytes(out)
+        if count >= 0x4000:
+            value = take(1)
+            count -= 0x4000
+            if len(out) + count > 0x1000000:
+                raise ValueError("record output exceeds 16 MiB")
+            out.extend(value * count)
+        else:
+            if not count:
+                raise ValueError("zero-length literal record")
+            if len(out) + count > 0x1000000:
+                raise ValueError("record output exceeds 16 MiB")
+            out.extend(take(count))
+    raise ValueError("record terminator missing")
 
 
-def _parse_sgml_block(blk_raw: bytes) -> tuple[int, int, bytes] | None:
+def _record_decode_auto(raw_file: bytes, expected: int) -> bytes | None:
+    """Decode a fmt=0x11 block, trying known keys; require the declared size."""
+    for key in _RECORD_KEYS:
+        try:
+            out = record_decode(raw_file, key)
+        except ValueError:
+            continue
+        if len(out) == expected:
+            return out
+    return None
+
+
+def _parse_sgml_block(raw_file: bytes) -> tuple[int, int, bytes] | None:
     """
-    Parse one SGML data block (fmt=0x11, already XOR'd with 0xFF).
+    Parse one SGML data block (fmt=0x11) from its raw (pre-XOR-FF) bytes.
 
-    Returns (start_addr, end_addr, decompressed_bytes) or None on failure.
+    Returns (start_addr, end_addr, decoded_bytes) or None on failure.
 
-    Each block contains a plaintext FRF-style header:
-        [SOURCE]\\n<name>\\n[CHECKSUM]\\n<hex>\\n[FORMAT]\\nBCB Type1...\\n
-        [START_ADDRESS]\\n<hex>\\n[END_ADDRESS]\\n<hex>\\n
-    Followed immediately by BCB-compressed binary data.
+    The block is XOR'd with 0xFF; decoded, it begins with a plaintext FRF-style
+    header giving [START_ADDRESS]/[END_ADDRESS], then a keyed record stream.
+    The placement address comes from [START_ADDRESS]; the stream is decoded by
+    record_decode (which re-applies the XOR-FF and locates the 1A 01 sync).
     """
-    text = blk_raw.decode("latin-1", errors="replace")
+    text = bytes(b ^ 0xFF for b in raw_file).decode("latin-1", errors="replace")
 
     m_end = re.search(r'\[END_ADDRESS\]\n([0-9A-Fa-f]+)\n', text)
     m_sta = re.search(r'\[START_ADDRESS\]\n([0-9A-Fa-f]+)\n', text)
@@ -229,8 +261,9 @@ def _parse_sgml_block(blk_raw: bytes) -> tuple[int, int, bytes] | None:
     if expected <= 0 or expected > 0x400000:
         return None
 
-    bcb_data = blk_raw[m_end.end():]
-    dec = _bcb_decompress(bcb_data, expected)
+    dec = _record_decode_auto(raw_file, expected)
+    if dec is None:
+        return None
     return start_addr, end_addr, dec
 
 
@@ -315,7 +348,7 @@ def unpack_sgml(data: bytes, verbose: bool = False) -> SGOResult:
                   for i in range(nblocks)]
 
     # Decode all blocks
-    binary = bytearray(0x480000)  # covers all MED9 flash incl. shadow at 0x404000
+    binary = bytearray(b"\xFF" * 0x480000)  # 0xFF = erased flash; covers shadow at 0x404000
     secs_out: list[SGOSection] = []
     total_comp = 0
     total_decomp = 0
@@ -335,12 +368,11 @@ def unpack_sgml(data: bytes, verbose: bool = False) -> SGOResult:
             # Uncompressed: raw data XOR'd with 0xFF
             blk_data = bytes(b ^ 0xFF for b in raw_file)
         elif fmt == 0x11:
-            # BCB-compressed with embedded FRF header
-            blk_xor = bytes(b ^ 0xFF for b in raw_file)
-            parsed  = _parse_sgml_block(blk_xor)
+            # FRF header + keyed record stream (decoded from the raw block)
+            parsed = _parse_sgml_block(raw_file)
             if parsed is None:
                 if verbose:
-                    print(f"  Block {bi}: no FRF header, fmt=0x11 — skipped")
+                    print(f"  Block {bi}: fmt=0x11 header/key not resolved — skipped")
                 continue
             start_virt, end_virt, blk_data = parsed
         else:
@@ -366,9 +398,9 @@ def unpack_sgml(data: bytes, verbose: bool = False) -> SGOResult:
         print(f"  PN={part_number}  SW={sw_version}  "
               f"SA2={sa2_data.hex()}  blocks={len(secs_out)}")
 
-    # Trim to 2MB if upper shadow region (0x200000+) is empty
+    # Trim to 2MB if the upper shadow region (0x200000+) is unused (erased).
     upper = binary[0x200000:]
-    if all(b == 0 for b in upper):
+    if all(b == 0xFF for b in upper):
         binary = binary[:0x200000]
 
     return SGOResult(
